@@ -1,0 +1,318 @@
+// Thomas 1 Strategy - Multi-Timeframe Trading Indicator
+//@version=5
+indicator("Thomas1 Strategy", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// ==================== INPUT SETTINGS ====================
+// Higher Timeframe Settings
+htf_timeframe = input.timeframe("60", "HTF Timeframe", tooltip="Higher timeframe for candle overlay")
+htf_bull_color = input.color(color.new(color.green, 80), "HTF Bullish Color", group="HTF Settings")
+htf_bear_color = input.color(color.new(color.red, 80), "HTF Bearish Color", group="HTF Settings")
+htf_border_color = input.color(color.gray, "HTF Border Color", group="HTF Settings")
+
+// Asia Session Settings
+asia_start_hour = input.int(19, "Asia Start Hour (EST)", minval=0, maxval=23, group="Asia Session")
+asia_start_minute = input.int(0, "Asia Start Minute", minval=0, maxval=59, group="Asia Session")
+asia_color = input.color(color.new(color.blue, 85), "30m Zone Color", group="Asia Session")
+asia_level_color = input.color(#5b9cf6, "1st Hour Level Color", group="Asia Session")
+
+// Market Structure Settings
+show_struct = input.bool(true, "Show Market Structure", group="Market Structure")
+left_bars = input.int(5, "Left Bars", minval=1, group="Market Structure")
+right_bars = input.int(5, "Right Bars", minval=1, group="Market Structure")
+bos_color = input.color(color.orange, "BOS Color", group="Market Structure")
+choch_color = input.color(color.aqua, "CHoCH Color", group="Market Structure")
+
+// Timezone Settings
+timezone = input.string("America/New_York", "Timezone", group="Timezone")
+
+// ==================== HTF CANDLE OVERLAY ====================
+// Get HTF data with lookahead to ensure proper alignment
+[htf_open, htf_high, htf_low, htf_close, htf_time] = request.security(
+    syminfo.tickerid, htf_timeframe, 
+    [open, high, low, close, time], 
+    lookahead=barmerge.lookahead_on)
+
+// Track HTF bar changes
+var float last_htf_time = na
+bool is_new_htf_bar = htf_time != last_htf_time
+
+// Draw hollow HTF candles
+var box htf_candle_box = na
+
+if is_new_htf_bar
+    // Create new box for the HTF candle
+    htf_candle_box := box.new(
+        left=bar_index,
+        top=htf_high,
+        right=bar_index,
+        bottom=htf_low,
+        bgcolor=htf_close >= htf_open ? htf_bull_color : htf_bear_color,
+        border_color=htf_border_color,
+        border_width=1)
+
+// Extend and update the current HTF candle box in realtime
+if not na(htf_candle_box)
+    box.set_righttop(htf_candle_box, bar_index, htf_high)
+    box.set_rightbottom(htf_candle_box, bar_index, htf_low)
+
+// ==================== HTF CANDLE COUNTDOWN ====================
+// Calculate time remaining in current HTF candle
+int htf_bar_duration = timeframe.in_seconds(htf_timeframe) * 1000
+int time_elapsed = timenow - htf_time
+int time_remaining = htf_bar_duration - time_elapsed
+
+// Only show countdown on current (realtime) candle
+bool is_current_candle = time_remaining > 0 and time_remaining < htf_bar_duration
+
+// Format countdown label
+string countdown_text = is_current_candle ? 
+    str.tostring(math.round(time_remaining / 60000)) + "m " + 
+    str.tostring(math.round((time_remaining % 60000) / 1000)) + "s" : ""
+
+// Draw countdown label (only on current candle)
+if is_new_htf_bar
+    label.new(
+        x=bar_index,
+        y=htf_close,
+        text=countdown_text,
+        style=label.style_label_center,
+        color=color.black,
+        textcolor=color.white,
+        size=size.normal)
+
+// ==================== ASIA SESSION LOGIC ====================
+// Convert time to EST
+int current_time_est = timestamp(timezone, year, month, dayofmonth, hour, minute)
+
+// Check if we're in the first hour of Asia session
+bool is_first_hour = hour(current_time_est) == asia_start_hour and 
+                     minute(current_time_est) >= asia_start_minute
+
+// Check if we're in the second hour
+bool is_second_hour = hour(current_time_est) == asia_start_hour + 1
+
+// Track 1st hour high/low
+var float asia_first_high = na
+var float asia_first_low = na
+var bool got_first_hour_data = false
+
+if is_first_hour
+    got_first_hour_data := true
+    asia_first_high := nz(asia_first_high, high)
+    asia_first_low := nz(asia_first_low, low)
+    asia_first_high := math.max(asia_first_high, high)
+    asia_first_low := math.min(asia_first_low, low)
+
+// Reset at session start
+if hour(current_time_est) == asia_start_hour and minute(current_time_est) == asia_start_minute
+    got_first_hour_data := false
+    asia_first_high := na
+    asia_first_low := na
+
+// Draw 1st hour high/low lines
+var line asia_high_line = na
+var line asia_low_line = na
+
+if got_first_hour_data and is_second_hour
+    if na(asia_high_line)
+        asia_high_line := line.new(
+            x1=bar_index[1], 
+            y1=asia_first_high, 
+            x2=bar_index, 
+            y2=asia_first_high,
+            color=asia_level_color,
+            width=2,
+            style=line.style_solid)
+    else
+        line.set_xy2(asia_high_line, bar_index, asia_first_high)
+    
+    if na(asia_low_line)
+        asia_low_line := line.new(
+            x1=bar_index[1], 
+            y1=asia_first_low, 
+            x2=bar_index, 
+            y2=asia_first_low,
+            color=asia_level_color,
+            width=2,
+            style=line.style_solid)
+    else
+        line.set_xy2(asia_low_line, bar_index, asia_first_low)
+
+// Signal at 2nd hour open
+bool second_hour_signal = hour(current_time_est) == asia_start_hour + 1 and 
+                          minute(current_time_est) == asia_start_minute
+
+if second_hour_signal
+    label.new(
+        x=bar_index,
+        y=high,
+        text="2nd Hour Open",
+        style=label.style_label_down,
+        color=color.green,
+        textcolor=color.white,
+        size=size.normal)
+
+// Breakout signals
+bool high_broken = got_first_hour_data and close > asia_first_high
+bool low_broken = got_first_hour_data and close < asia_first_low
+
+if high_broken
+    label.new(
+        x=bar_index,
+        y=high,
+        text="High Broken",
+        style=label.style_label_down,
+        color=color.blue,
+        textcolor=color.white,
+        size=size.small)
+
+if low_broken
+    label.new(
+        x=bar_index,
+        y=low,
+        text="Low Broken",
+        style=label.style_label_up,
+        color=color.red,
+        textcolor=color.white,
+        size=size.small)
+
+// ==================== 30 MINUTE BOX ====================
+// Create box for last 30 minutes of 2nd hour
+bool is_last_30min = hour(current_time_est) == asia_start_hour + 1 and 
+                     minute(current_time_est) >= 30
+
+var box th_min_box = na
+var float box_top = na
+var float box_bottom = na
+
+if is_last_30min
+    box_top := math.max(nz(box_top, high), high)
+    box_bottom := math.min(nz(box_bottom, low), low)
+    
+    if na(th_min_box)
+        th_min_box := box.new(
+            left=bar_index,
+            top=box_top,
+            right=bar_index,
+            bottom=box_bottom,
+            bgcolor=asia_color,
+            border_color=color.new(color.blue, 0),
+            border_width=1)
+    else
+        box.set_righttop(th_min_box, bar_index, box_top)
+        box.set_rightbottom(th_min_box, bar_index, box_bottom)
+else
+    // Reset box
+    box_top := na
+    box_bottom := na
+
+// ==================== MARKET STRUCTURE (BOS/CHOCH) ====================
+// Pivot detection
+ph = ta.highest(high, left_bars)
+pl = ta.lowest(low, right_bars)
+
+bool is_pivot_high = na(ph) ? false : high == ph
+bool is_pivot_low = na(pl) ? false : low == pl
+
+var float last_pivot_high = na
+var float last_pivot_low = na
+var float last_pivot_high_bar = na
+var float last_pivot_low_bar = na
+
+if is_pivot_high
+    last_pivot_high := high
+    last_pivot_high_bar := bar_index
+
+if is_pivot_low
+    last_pivot_low := low
+    last_pivot_low_bar := bar_index
+
+// BOS Detection (Break of Structure)
+bool bull_bos = not na(last_pivot_low) and ta.crossover(high, last_pivot_high) and show_struct
+bool bear_bos = not na(last_pivot_high) and ta.crossunder(low, last_pivot_low) and show_struct
+
+// CHoCH Detection (Change of Character)
+bool bull_choch = not na(last_pivot_low) and ta.crossunder(low, last_pivot_low) and show_struct
+bool bear_choch = not na(last_pivot_high) and ta.crossover(high, last_pivot_high) and show_struct
+
+// Draw BOS/CHOCH lines and labels
+if bull_bos
+    // Draw line
+    line.new(
+        x1=last_pivot_high_bar,
+        y1=last_pivot_high,
+        x2=bar_index,
+        y2=last_pivot_high,
+        color=bos_color,
+        width=1,
+        style=line.style_dashed)
+    
+    // Centered label - slightly above
+    label.new(
+        x=math.round((last_pivot_high_bar + bar_index) / 2),
+        y=last_pivot_high,
+        text="BOS",
+        style=label.style_label_down,
+        color=bos_color,
+        textcolor=color.white,
+        size=size.small)
+
+if bear_bos
+    line.new(
+        x1=last_pivot_low_bar,
+        y1=last_pivot_low,
+        x2=bar_index,
+        y2=last_pivot_low,
+        color=bos_color,
+        width=1,
+        style=line.style_dashed)
+    
+    label.new(
+        x=math.round((last_pivot_low_bar + bar_index) / 2),
+        y=last_pivot_low,
+        text="BOS",
+        style=label.style_label_up,
+        color=bos_color,
+        textcolor=color.white,
+        size=size.small)
+
+if bull_choch
+    line.new(
+        x1=last_pivot_low_bar,
+        y1=last_pivot_low,
+        x2=bar_index,
+        y2=last_pivot_low,
+        color=choch_color,
+        width=1,
+        style=line.style_dashed)
+    
+    label.new(
+        x=math.round((last_pivot_low_bar + bar_index) / 2),
+        y=last_pivot_low,
+        text="CHoCH",
+        style=label.style_label_up,
+        color=choch_color,
+        textcolor=color.white,
+        size=size.small)
+
+if bear_choch
+    line.new(
+        x1=last_pivot_high_bar,
+        y1=last_pivot_high,
+        x2=bar_index,
+        y2=last_pivot_high,
+        color=choch_color,
+        width=1,
+        style=line.style_dashed)
+    
+    label.new(
+        x=math.round((last_pivot_high_bar + bar_index) / 2),
+        y=last_pivot_high,
+        text="CHoCH",
+        style=label.style_label_down,
+        color=choch_color,
+        textcolor=color.white,
+        size=size.small)
+
+// ==================== PLOT ====================
+plot(close, color=color.new(color.gray, 70), linewidth=1, title="Price")
