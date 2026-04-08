@@ -1,0 +1,331 @@
+// Thomas_asia_pro_v2.pine
+// HTF Overlap & Asia Breakout Pro v2
+// Advanced TradingView Pine Script v6 indicator
+
+//@version=6
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+indicator("HTF Overlap & Asia Breakout Pro", "HTF Overlay", 
+          overlay = true, 
+          max_boxes_count = 500, 
+          max_labels_count = 500, 
+          max_lines_count = 500)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+
+// HTF Settings
+string htfTfInput = input.timeframe("60", "HTF Candle Timeframe", 
+                                    group = "HTF Style", 
+                                    tooltip = "The timeframe for the hollow candles displayed on top of the chart.")
+
+color htfBullColor = input.color(#089981, "HTF Bullish Color", 
+                                 inline = "htf", 
+                                 group = "HTF Style")
+
+color htfBearColor = input.color(#f23645, "HTF Bearish Color", 
+                                 inline = "htf", 
+                                 group = "HTF Style")
+
+int htfTransp = input.int(85, "HTF Body Transparency", 
+                          minval = 0, 
+                          maxval = 100, 
+                          group = "HTF Style")
+
+bool showCountdown = input.bool(true, "Show Candle Countdown", 
+                                group = "HTF Style")
+
+// Asia Session
+string tzInput = input.string("America/New_York", "Timezone", 
+                              group = "Asia Session", 
+                              tooltip = "Timezone for session logic (default: America/New_York = EST/EDT).")
+
+int sessionStartHour = input.int(19, "Asia Start Hour (24h)", 
+                                  minval = 0, 
+                                  maxval = 23, 
+                                  group = "Asia Session")
+
+int sessionStartMin = input.int(0, "Asia Start Minute", 
+                                 minval = 0, 
+                                 maxval = 59, 
+                                 group = "Asia Session")
+
+color asiaLevelColor = input.color(#5b9cf6, "Asia 1H High/Low Color", 
+                                   group = "Asia Session")
+
+// Market Structure
+int pivotLen = input.int(3, "Pivot Length", 
+                         minval = 1, 
+                         group = "Market Structure", 
+                         tooltip = "Bars left/right for pivot detection.")
+
+color bosColor = input.color(color.gray, "BOS Color", 
+                             inline = "ms", 
+                             group = "Market Structure")
+
+color chochColor = input.color(color.gray, "CHoCH Color",
+                               inline = "ms", 
+                               group = "Market Structure")
+
+// ─────────────────────────────────────────────
+// HTF HOLLOW CANDLE OVERLAY
+// ─────────────────────────────────────────────
+
+[hOpen, hHigh, hLow, hClose, hTime, hTimeClose] = request.security(
+    syminfo.tickerid, 
+    htfTfInput, 
+    [open, high, low, close, time, time_close], 
+    lookahead = barmerge.lookahead_on)
+
+bool isNewHtf = ta.change(hTime) != 0
+
+var box htfBody = na
+var line htfWickHigh = na  // upper wick: body_top → hHigh
+var line htfWickLow = na   // lower wick: body_bot → hLow
+var label htfLabel = na
+var int htfStartIdx = 0
+
+// On each new HTF candle, create fresh drawing objects
+if isNewHtf
+    htfStartIdx := bar_index
+    htfBody := box.new(bar_index, hOpen, bar_index, hClose, 
+                        border_width = 1, 
+                        xloc = xloc.bar_index)
+    
+    // Two separate vertical lines for upper and lower wicks
+    htfWickHigh := line.new(bar_index, math.max(hOpen, hClose), 
+                             bar_index, hHigh, 
+                             width = 1, 
+                             xloc = xloc.bar_index)
+    
+    htfWickLow := line.new(bar_index, math.min(hOpen, hClose), 
+                            bar_index, hLow, 
+                            width = 1, 
+                            xloc = xloc.bar_index)
+    
+    if not na(htfLabel)
+        label.delete(htfLabel)
+    
+    htfLabel := na
+
+// Update drawings every bar
+if not na(htfBody)
+    bool isBull = hClose >= hOpen
+    color c = isBull ? htfBullColor : htfBearColor
+    float bodyTop = math.max(hOpen, hClose)
+    float bodyBot = math.min(hOpen, hClose)
+    int midBar = math.round((htfStartIdx + bar_index) / 2)
+    
+    // Body box
+    box.set_right(htfBody, bar_index)
+    box.set_top(htfBody, bodyTop)
+    box.set_bottom(htfBody, bodyBot)
+    box.set_border_color(htfBody, c)
+    box.set_bgcolor(htfBody, color.new(c, htfTransp))
+    
+    // Upper wick: from body top to candle high — anchored at midpoint x
+    line.set_xy1(htfWickHigh, midBar, bodyTop)
+    line.set_xy2(htfWickHigh, midBar, hHigh)
+    line.set_color(htfWickHigh, c)
+    
+    // Lower wick: from body bottom to candle low — anchored at midpoint x
+    line.set_xy1(htfWickLow, midBar, bodyBot)
+    line.set_xy2(htfWickLow, midBar, hLow)
+    line.set_color(htfWickLow, c)
+    
+    // Countdown label — only on the live/developing candle
+    if showCountdown
+        if na(htfLabel)
+            htfLabel := label.new(midBar, (bodyTop + bodyBot) / 2, "", 
+                                  color = #00000000, 
+                                  style = label.style_label_center, 
+                                  textcolor = chart.fg_color, 
+                                  size = size.small)
+        
+        int timeLeft = math.max(0, hTimeClose - time)
+        int mins = timeLeft / 60000
+        int secs = (timeLeft % 60000) / 1000
+        
+        label.set_xy(htfLabel, midBar, (bodyTop + bodyBot) / 2)
+        label.set_text(htfLabel, str.format("{0}:{1,number,02}", mins, secs))
+
+// ─────────────────────────────────────────────
+// ASIA SESSION LOGIC
+// ─────────────────────────────────────────────
+
+int curHour = hour(time, tzInput)
+int curMin = minute(time, tzInput)
+int h2 = (sessionStartHour + 1) % 24  // second-hour start
+
+// Detect session boundary transitions
+bool isAsiaStart = curHour == sessionStartHour and curMin == sessionStartMin and ta.change(bar_index) != 0
+bool isSecondHourStart = curHour == h2 and curMin == sessionStartMin
+bool inFirstHour = curHour == sessionStartHour
+
+// Use a "session day" key so reset fires exactly once per calendar date
+int sessionDay = dayofmonth(time, tzInput) * 100 + month(time, tzInput)
+
+var int lastSessionDay = -1
+var float firstHourH = na
+var float firstHourL = na
+var int firstHourStartB = na
+var bool highBroken = false
+var bool lowBroken = false
+var bool secondDrawn = false
+var box zoneBox = na
+var bool zoneStarted = false
+
+// Reset state at the start of each Asia session
+if inFirstHour and sessionDay != lastSessionDay
+    lastSessionDay := sessionDay
+    firstHourH := high
+    firstHourL := low
+    firstHourStartB := bar_index
+    highBroken := false
+    lowBroken := false
+    secondDrawn := false
+    zoneStarted := false
+    zoneBox := na
+
+// Expand 1st-hour range throughout the first hour
+if inFirstHour and sessionDay == lastSessionDay
+    firstHourH := math.max(firstHourH, high)
+    firstHourL := math.min(firstHourL, low)
+
+// Draw bold blue H/L lines and "2nd Hour Open" label exactly once
+if isSecondHourStart and not secondDrawn and not na(firstHourH)
+    secondDrawn := true
+    label.new(bar_index, high, "2nd Hour Open", 
+              color = #5b9cf6, 
+              style = label.style_label_down, 
+              textcolor = color.white, 
+              size = size.small)
+    
+    line.new(firstHourStartB, firstHourH, bar_index + 120, firstHourH, 
+             color = asiaLevelColor, 
+             width = 2, 
+             style = line.style_solid)
+    
+    line.new(firstHourStartB, firstHourL, bar_index + 120, firstHourL, 
+             color = asiaLevelColor, 
+             width = 2, 
+             style = line.style_solid)
+
+// Breakout signals (fire only after 1st hour is complete)
+bool afterFirstHour = curHour >= h2 or (h2 < sessionStartHour)  // handles midnight wrap
+
+if afterFirstHour and not na(firstHourH)
+    if not highBroken and high > firstHourH
+        highBroken := true
+        label.new(bar_index, high, "1H High Break", 
+                  color = #089981, 
+                  style = label.style_label_down, 
+                  textcolor = color.white, 
+                  size = size.tiny)
+    
+    if not lowBroken and low < firstHourL
+        lowBroken := true
+        label.new(bar_index, low, "1H Low Break", 
+                  color = #f23645, 
+                  style = label.style_label_up, 
+                  textcolor = color.white, 
+                  size = size.tiny)
+
+// Last 30-minute zone of the 2nd hour (e.g., 8:30–9:00 PM EST)
+bool in2ndHourLast30 = (curHour == h2) and (curMin >= 30)
+
+if in2ndHourLast30
+    if not zoneStarted
+        zoneStarted := true
+        zoneBox := box.new(bar_index, high, bar_index, low, 
+                          border_color = color.new(chart.fg_color, 50), 
+                          bgcolor = color.new(chart.fg_color, 90), 
+                          text = "Last 30m", 
+                          text_size = size.tiny, 
+                          text_color = chart.fg_color)
+    else if not na(zoneBox)
+        box.set_right(zoneBox, bar_index)
+        box.set_top(zoneBox, math.max(box.get_top(zoneBox), high))
+        box.set_bottom(zoneBox, math.min(box.get_bottom(zoneBox), low))
+
+// ─────────────────────────────────────────────
+// MARKET STRUCTURE — BOS & CHoCH
+// ─────────────────────────────────────────────
+
+float pHigh = ta.pivothigh(pivotLen, pivotLen)
+float pLow = ta.pivotlow(pivotLen, pivotLen)
+
+var float msTop = na
+var float msBottom = na
+var int msTopIdx = na
+var int msBottomIdx = na
+var bool trendBull = true
+
+// Record pivot highs/lows at their actual bar
+if not na(pHigh)
+    msTop := pHigh
+    msTopIdx := bar_index[pivotLen]
+
+if not na(pLow)
+    msBottom := pLow
+    msBottomIdx := bar_index[pivotLen]
+
+// Upside break — BOS if already bullish, CHoCH if bearish trend reversing
+if not na(msTop) and close > msTop
+    string lbl = trendBull ? "BOS" : "CHoCH"
+    color col = trendBull ? bosColor : chochColor
+    int mid = math.round((msTopIdx + bar_index) / 2)
+    
+    line.new(msTopIdx, msTop, bar_index, msTop, 
+             color = col, 
+             style = line.style_dashed, 
+             width = 1)
+    
+    // label_down: pointer below text, so text sits ABOVE the line
+    label.new(mid, msTop, lbl, 
+              color = #00000000, 
+              textcolor = col, 
+              style = label.style_label_down, 
+              size = size.tiny)
+    
+    trendBull := true
+    msTop := na
+
+// Downside break — BOS if already bearish, CHoCH if bullish trend reversing
+if not na(msBottom) and close < msBottom
+    string lbl = not trendBull ? "BOS" : "CHoCH"
+    color col = not trendBull ? bosColor : chochColor
+    int mid = math.round((msBottomIdx + bar_index) / 2)
+    
+    line.new(msBottomIdx, msBottom, bar_index, msBottom, 
+             color = col, 
+             style = line.style_dashed, 
+             width = 1)
+    
+    // label_up: pointer above text, so text sits BELOW the line
+    label.new(mid, msBottom, lbl, 
+              color = #00000000, 
+              textcolor = col, 
+              style = label.style_label_up, 
+              size = size.tiny)
+    
+    trendBull := false
+    msBottom := na
+
+/*
+  HTF Overlap & Asia Breakout Pro v2
+  =========================================
+  
+  Features:
+  ✓ HTF hollow candle overlay with wicks
+  ✓ Real-time countdown timer for HTF candle closes
+  ✓ Asia session breakout logic (1st hour tracking)
+  ✓ Dynamic 30-minute zone box
+  ✓ Market structure (BOS/CHOCH) with professional offset labels
+  
+  Version: 2.0 (Pine Script v6)
+  License: MPL 2.0
+  
+  Next: Wait for instructions from Thomas
+*/
